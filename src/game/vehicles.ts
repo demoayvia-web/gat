@@ -68,6 +68,7 @@ export interface VehicleInstance {
   aiDeployTimer?: number;
   smokeCooldown?: number;
   crashJolt?: number;
+  aiHornCooldown?: number;
 }
 
 function createWheel(radius: number, width: number, mats: MaterialLibrary): THREE.Group {

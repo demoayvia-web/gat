@@ -218,6 +218,32 @@ export class SoundEngine {
     osc.stop(now + 0.78);
   }
 
+  public playHorn(volumeScale = 1) {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+    const gain = ctx.createGain();
+    const vol = Math.max(0.15, Math.min(1.0, volumeScale)) * 0.16;
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(vol, now + 0.02);
+    gain.gain.setValueAtTime(vol, now + 0.17);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+    gain.connect(this.masterGain);
+
+    for (const freq of [415, 523]) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(freq, now);
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 1450;
+      osc.connect(filter);
+      filter.connect(gain);
+      osc.start(now);
+      osc.stop(now + 0.25);
+    }
+  }
+
   public dispose() {
     try {
       this.engineOsc?.stop();

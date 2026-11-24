@@ -19,6 +19,9 @@ export interface MaterialLibrary {
   gordJacketBackMat: THREE.MeshStandardMaterial;
   skinMat: THREE.MeshPhysicalMaterial;
   skinFaceMat: THREE.MeshPhysicalMaterial;
+  skinPoreBumpMap: THREE.CanvasTexture;
+  irisMap: THREE.CanvasTexture;
+  fabricWeaveBumpMap: THREE.CanvasTexture;
   tireMat: THREE.MeshStandardMaterial;
   chromeMat: THREE.MeshPhysicalMaterial;
   glassMat: THREE.MeshPhysicalMaterial;
@@ -482,12 +485,72 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer, isSoftwareG
     metalness: 0.16,
   });
 
-  // 10. Realistic Human Skin & Face Texture
+  // 10. Realistic Human Skin Pores, Facial Shading, Iris Fibers & Fabric Weave
+  const [poreC, poreCtx] = makeCanvas(512, 512);
+  poreCtx.fillStyle = '#808080';
+  poreCtx.fillRect(0, 0, 512, 512);
+  // Multi-scale skin pores & fine dermal lines
+  for (let i = 0; i < 24000; i++) {
+    const px = Math.random() * 512;
+    const py = Math.random() * 512;
+    const r = Math.random() < 0.25 ? 2 : 1;
+    const shade = Math.random() > 0.38 ? 96 + Math.floor(Math.random() * 24) : 148 + Math.floor(Math.random() * 22);
+    poreCtx.fillStyle = `rgb(${shade},${shade},${shade})`;
+    poreCtx.fillRect(px, py, r, r);
+  }
+  poreCtx.strokeStyle = 'rgba(105, 105, 105, 0.22)';
+  poreCtx.lineWidth = 1;
+  for (let y = 16; y < 512; y += 22) {
+    poreCtx.beginPath();
+    poreCtx.moveTo(0, y);
+    poreCtx.bezierCurveTo(170, y + 3, 340, y - 3, 512, y);
+    poreCtx.stroke();
+  }
+  const skinPoreBumpMap = configTex(new THREE.CanvasTexture(poreC), false, maxAniso, 2, 2);
+  textures.push(skinPoreBumpMap);
+
+  // Radial human iris texture (fibers + collarette + dark limbal ring)
+  const [irisC, irisCtx] = makeCanvas(256, 256);
+  irisCtx.fillStyle = '#8aa8b8';
+  irisCtx.fillRect(0, 0, 256, 256);
+  const irisGrad = irisCtx.createRadialGradient(128, 128, 18, 128, 128, 124);
+  irisGrad.addColorStop(0, '#c8b896');
+  irisGrad.addColorStop(0.28, '#9ec4d6');
+  irisGrad.addColorStop(0.82, '#5c7c8e');
+  irisGrad.addColorStop(1, '#1e293b');
+  irisCtx.fillStyle = irisGrad;
+  irisCtx.fillRect(0, 0, 256, 256);
+  for (let a = 0; a < 180; a++) {
+    const ang = (a / 180) * Math.PI * 2;
+    irisCtx.strokeStyle = a % 3 === 0 ? 'rgba(255,255,255,0.22)' : 'rgba(15,23,42,0.26)';
+    irisCtx.lineWidth = 1.4;
+    irisCtx.beginPath();
+    irisCtx.moveTo(128 + Math.cos(ang) * 28, 128 + Math.sin(ang) * 28);
+    irisCtx.lineTo(128 + Math.cos(ang) * 116, 128 + Math.sin(ang) * 116);
+    irisCtx.stroke();
+  }
+  const irisMap = configTex(new THREE.CanvasTexture(irisC), true, maxAniso);
+  textures.push(irisMap);
+
+  // Textile weave bump texture for realistic clothing & coat motion
+  const [fwC, fwCtx] = makeCanvas(256, 256);
+  fwCtx.fillStyle = '#808080';
+  fwCtx.fillRect(0, 0, 256, 256);
+  for (let y = 0; y < 256; y += 4) {
+    for (let x = 0; x < 256; x += 4) {
+      const alt = ((x + y) / 4) % 2 === 0;
+      fwCtx.fillStyle = alt ? '#969696' : '#6c6c6c';
+      fwCtx.fillRect(x, y, 3, 2);
+    }
+  }
+  const fabricWeaveBumpMap = configTex(new THREE.CanvasTexture(fwC), false, maxAniso, 6, 6);
+  textures.push(fabricWeaveBumpMap);
+
   const [skC, skCtx] = makeCanvas(256, 256);
   skCtx.fillStyle = '#d4a383';
   skCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 6000; i++) {
-    skCtx.fillStyle = Math.random() > 0.5 ? 'rgba(180,115,85,0.08)' : 'rgba(245,205,180,0.08)';
+  for (let i = 0; i < 8500; i++) {
+    skCtx.fillStyle = Math.random() > 0.5 ? 'rgba(176,108,78,0.11)' : 'rgba(248,210,186,0.10)';
     skCtx.fillRect(Math.random() * 256, Math.random() * 256, 2, 2);
   }
   const skTex = configTex(new THREE.CanvasTexture(skC), true, maxAniso);
@@ -495,31 +558,35 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer, isSoftwareG
 
   const skinMat = new THREE.MeshPhysicalMaterial({
     map: skTex,
-    bumpMap: skTex,
-    bumpScale: 0.008,
-    roughness: 0.54,
+    bumpMap: skinPoreBumpMap,
+    bumpScale: 0.011,
+    roughness: 0.52,
     metalness: 0.0,
-    clearcoat: 0.12,
-    clearcoatRoughness: 0.62,
-    sheen: 0.24,
-    sheenColor: new THREE.Color(0xffb899),
+    clearcoat: 0.14,
+    clearcoatRoughness: 0.58,
+    sheen: 0.28,
+    sheenColor: new THREE.Color(0xffb494),
   });
 
-  // Face texture with subtle stubble, eyebrows, natural lips shading
+  // Face texture with subtle pores, capillary warmth, under-eye tone & stubble
   const [fcC, fcCtx] = makeCanvas(512, 512);
   fcCtx.fillStyle = '#d4a383';
   fcCtx.fillRect(0, 0, 512, 512);
-  // Subtle cheek blush & nose bridge shading
+  for (let i = 0; i < 14000; i++) {
+    fcCtx.fillStyle = Math.random() > 0.45 ? 'rgba(165, 98, 74, 0.09)' : 'rgba(245, 206, 182, 0.08)';
+    fcCtx.fillRect(Math.random() * 512, Math.random() * 512, 2, 2);
+  }
+  // Subtle cheek blush & nose bridge warmth
   const cheekG = fcCtx.createRadialGradient(256, 270, 30, 256, 270, 220);
-  cheekG.addColorStop(0, 'rgba(218, 152, 122, 0.3)');
-  cheekG.addColorStop(1, 'rgba(150, 96, 72, 0.18)');
+  cheekG.addColorStop(0, 'rgba(218, 146, 118, 0.34)');
+  cheekG.addColorStop(1, 'rgba(148, 92, 70, 0.2)');
   fcCtx.fillStyle = cheekG;
   fcCtx.fillRect(0, 0, 512, 512);
   // Beard stubble on lower jaw
   const stubbleG = fcCtx.createLinearGradient(0, 300, 0, 480);
-  stubbleG.addColorStop(0, 'rgba(40, 32, 28, 0)');
-  stubbleG.addColorStop(0.4, 'rgba(40, 32, 28, 0.22)');
-  stubbleG.addColorStop(1, 'rgba(40, 32, 28, 0.34)');
+  stubbleG.addColorStop(0, 'rgba(38, 30, 26, 0)');
+  stubbleG.addColorStop(0.4, 'rgba(38, 30, 26, 0.24)');
+  stubbleG.addColorStop(1, 'rgba(38, 30, 26, 0.36)');
   fcCtx.fillStyle = stubbleG;
   fcCtx.fillRect(140, 300, 232, 180);
   const fcTex = configTex(new THREE.CanvasTexture(fcC), true, maxAniso);
@@ -527,14 +594,14 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer, isSoftwareG
 
   const skinFaceMat = new THREE.MeshPhysicalMaterial({
     map: fcTex,
-    bumpMap: skTex,
-    bumpScale: 0.008,
-    roughness: 0.52,
+    bumpMap: skinPoreBumpMap,
+    bumpScale: 0.013,
+    roughness: 0.49,
     metalness: 0.0,
-    clearcoat: 0.14,
-    clearcoatRoughness: 0.58,
-    sheen: 0.22,
-    sheenColor: new THREE.Color(0xffb899),
+    clearcoat: 0.16,
+    clearcoatRoughness: 0.54,
+    sheen: 0.28,
+    sheenColor: new THREE.Color(0xffb494),
   });
 
   // 11. Tire, Chrome, Glass, Water
@@ -667,6 +734,9 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer, isSoftwareG
     gordJacketBackMat,
     skinMat,
     skinFaceMat,
+    skinPoreBumpMap,
+    irisMap,
+    fabricWeaveBumpMap,
     tireMat,
     chromeMat,
     glassMat,

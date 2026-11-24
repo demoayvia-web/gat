@@ -5,19 +5,32 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { createMaterialLibrary, MaterialLibrary } from './materials';
 import { buildCity, BuildingCollider, getIntersectionSignal, PhysicsProp, ROAD_CENTERS, TrafficSignalSet } from './city';
-import { animateCharacterRig, buildGordCharacter, buildHumanNpc, CharacterRig, NpcRole } from './characters';
+import {
+  animateCharacterRig,
+  buildGordCharacter,
+  buildHumanNpc,
+  CharacterGender,
+  CharacterGesture,
+  CharacterRig,
+  FacialExpression,
+  NpcRole,
+  WorkPose,
+} from './characters';
 import { buildVehicle, deformVehicleBody, VehicleInstance } from './vehicles';
 import { SoundEngine } from './audio';
 import {
   CITY_POIS,
+  GORD_REACTION_LINES,
   INITIAL_PROPERTIES,
   INITIAL_UPGRADES,
   INITIAL_VEHICLES_CATALOG,
   INITIAL_WEAPONS,
+  NPC_CHATTER_PAIRS,
   NPC_DIALOGUES,
   STORY_MISSIONS,
 } from './data';
 import {
+  AmbientSpeechBubble,
   CameraMode,
   CyberStage,
   CyberUpgrade,
@@ -38,10 +51,37 @@ const _v2 = new THREE.Vector3();
 const _camTarget = new THREE.Vector3();
 const _camPos = new THREE.Vector3();
 
+type NpcTrait = 'спокойный' | 'любопытный' | 'трудоголик' | 'нервный' | 'смелый';
+type NpcAiState = 'commute' | 'work' | 'socialize' | 'panic' | 'witness';
+
+interface NpcProfile {
+  name: string;
+  occupation: string;
+  trait: NpcTrait;
+  preferredWork: WorkPose;
+}
+
 interface NpcActor {
   id: string;
   role: NpcRole;
+  gender: CharacterGender;
   rig: CharacterRig;
+  profile: NpcProfile;
+  aiState: NpcAiState;
+  stateTimer: number;
+  socialCooldown: number;
+  partnerId?: string;
+  partnerLine?: string;
+  partnerReplyPending?: boolean;
+  chatterText?: string;
+  chatterTimer?: number;
+  chatterTone?: AmbientSpeechBubble['tone'];
+  gordReactCooldown?: number;
+  reactTimer?: number;
+  reactKind?: 'none' | 'greet' | 'awe' | 'caution' | 'fear' | 'annoyed';
+  witnessX?: number;
+  witnessZ?: number;
+  hostileAggro?: boolean;
   x: number;
   y: number;
   z: number;
@@ -548,32 +588,67 @@ export class NexorumEngine {
       this.vehicles.push(car);
     }
 
-    // Living City Pedestrians (Walking, Talking, Police)
-    for (let i = 0; i < 22; i++) {
+    // Living City Pedestrians (Diverse appearances, jobs, personalities & autonomous routines)
+    const residentNames = [
+      'Артём Волков', 'Елена Соколова', 'Маркус Кейн', 'Алина Крылова',
+      'Дмитрий Орлов', 'Кира Лебедева', 'Виктор Белов', 'София Миллер',
+      'Максим Зайцев', 'Анна Воронцова', 'Игорь Титов', 'Дарья Новикова',
+      'Павел Громов', 'Ника Сафронова', 'Роман Чернов', 'Вера Фролова',
+      'Тимур Хасанов', 'Ольга Кузнецова', 'Леонид Ковалёв', 'Мила Ершова',
+      'Степан Морозов', 'Татьяна Беляева', 'Денис Соболев', 'Алиса Романова',
+    ];
+    const occupations = [
+      'Инженер NEXORUM', 'Репортёр City News', 'Механик', 'Финансовый аналитик',
+      'Техник сетей', 'Курьер', 'Архитектор', 'Медик', 'Бариста', 'Охранник',
+    ];
+    const traits: NpcTrait[] = ['спокойный', 'любопытный', 'трудоголик', 'нервный', 'смелый'];
+    const workPoses: WorkPose[] = ['phone', 'clipboard', 'inspect'];
+
+    for (let i = 0; i < 28; i++) {
       const role: NpcRole = i < 3 ? 'police' : 'civilian';
-      const rig = buildHumanNpc(this.mats, role, i);
+      const gender: CharacterGender = role === 'police' ? (i === 1 ? 'female' : 'male') : i % 2 === 1 ? 'female' : 'male';
+      const rig = buildHumanNpc(this.mats, role, i * 7 + 3, gender);
       const bx = ((i * 60) % 240) - 120;
       const bz = ((Math.floor(i / 4) * 60) % 240) - 120;
       const sx = bx + (i % 2 === 0 ? 22 : -22);
       const sz = bz + ((i * 13) % 32) - 16;
       rig.root.position.set(sx, 0.16, sz);
       this.scene.add(rig.root);
+
+      const trait = role === 'police' ? 'смелый' : traits[i % traits.length];
+      const preferredWork: WorkPose = role === 'police' ? 'clipboard' : workPoses[i % workPoses.length];
+      const startWorking = role === 'civilian' && i % 4 === 1;
+      if (startWorking) {
+        rig.setWorkProp?.(preferredWork);
+      }
+
       this.npcs.push({
         id: `npc_${i}`,
         role,
+        gender,
         rig,
+        profile: {
+          name: role === 'police' ? `Офицер #${104 + i}` : residentNames[i % residentNames.length],
+          occupation: role === 'police' ? 'Патрульный NCPD' : occupations[i % occupations.length],
+          trait,
+          preferredWork,
+        },
+        aiState: startWorking ? 'work' : 'commute',
+        stateTimer: 5 + (i % 6) * 2.2,
+        socialCooldown: 2 + (i % 5) * 1.5,
+        gordReactCooldown: (i % 4) * 1.2,
         x: sx,
         y: 0.16,
         z: sz,
         yaw: Math.random() * Math.PI * 2,
         vx: 0,
         vz: 0,
-        speed: 1.35 + Math.random() * 0.6,
-        health: role === 'police' ? 95 : 55,
-        maxHealth: role === 'police' ? 95 : 55,
+        speed: trait === 'трудоголик' ? 1.65 : trait === 'спокойный' ? 1.25 : 1.45,
+        health: role === 'police' ? 95 : trait === 'смелый' ? 70 : 55,
+        maxHealth: role === 'police' ? 95 : trait === 'смелый' ? 70 : 55,
         alive: true,
         fireCooldown: 0,
-        talkingTimer: i % 5 === 0 ? 999 : 0,
+        talkingTimer: 0,
         patrolAngle: Math.random() * Math.PI * 2,
         phase: Math.random() * 6,
       });
@@ -592,13 +667,24 @@ export class NexorumEngine {
   }
 
   private spawnEnemy(role: NpcRole, x: number, z: number, missionTag?: string) {
-    const rig = buildHumanNpc(this.mats, role, Math.floor(Math.random() * 100));
+    const seed = Math.floor(Math.random() * 100);
+    const rig = buildHumanNpc(this.mats, role, seed, 'male');
     rig.root.position.set(x, 0.16, z);
     this.scene.add(rig.root);
     this.npcs.push({
       id: `enemy_${Math.random().toString(36).slice(2, 8)}`,
       role,
+      gender: 'male',
       rig,
+      profile: {
+        name: role === 'boss' ? 'Дон Вальтер' : role === 'police' ? 'Спецотряд NCPD' : 'Боевик синдиката',
+        occupation: role === 'boss' ? 'Глава мафии' : role === 'police' ? 'Полиция' : 'Синдикат',
+        trait: 'смелый',
+        preferredWork: 'none',
+      },
+      aiState: 'commute',
+      stateTimer: 10,
+      socialCooldown: 99,
       x,
       y: 0.16,
       z,
@@ -1240,14 +1326,34 @@ export class NexorumEngine {
       }
     }
 
-    // 2. Talk to nearest civilian NPC
+    // 2. Talk to nearest civilian NPC with context-aware response & synced lip-sync
     for (const npc of this.npcs) {
       if (!npc.alive || npc.role !== 'civilian') continue;
       if (Math.hypot(npc.x - this.px, npc.z - this.pz) < 4.2) {
-        const line = NPC_DIALOGUES[Math.floor(Math.random() * NPC_DIALOGUES.length)];
-        this.activeDialogue = line;
-        this.dialogueTimer = 6.0;
-        npc.talkingTimer = 6.0;
+        let contextText = NPC_DIALOGUES[Math.floor(Math.random() * NPC_DIALOGUES.length)].text;
+        if (this.wantedStars >= 2) {
+          contextText =
+            npc.profile.trait === 'нервный'
+              ? 'Осторожнее! Здесь повсюду сирены и полиция, нам всем лучше уйти с дороги!'
+              : 'Полиция оцепила квартал, Горд. Лучше не привлекать лишнего внимания.';
+        } else if (this.weather === 'rain') {
+          contextText = 'Снова проливной дождь над NEXORUM... Зато асфальт блестит как зеркало. Береги себя на поворотах.';
+        } else if (this.cyberStage >= 2) {
+          contextText = `Ничего себе у тебя импланты, Горд! Вижу, ты уже на ${this.cyberStage * 25}% кибернетизирован.`;
+        } else if (npc.aiState === 'work') {
+          contextText = `Закрываю смену (${npc.profile.occupation}). В городе сегодня напряжённый трафик, проверяю сводки.`;
+        }
+
+        this.activeDialogue = {
+          speaker: `${npc.profile.name} · ${npc.profile.trait}`,
+          role: npc.profile.occupation,
+          text: contextText,
+        };
+        this.dialogueTimer = 6.2;
+        npc.talkingTimer = 6.2;
+        npc.aiState = 'socialize';
+        npc.stateTimer = 6.2;
+        npc.rig.setWorkProp?.('none');
         npc.yaw = Math.atan2(this.px - npc.x, this.pz - npc.z);
         this.audio.playUiConfirm();
         this.emitHud();
@@ -1623,8 +1729,25 @@ export class NexorumEngine {
       if (!npc.alive || npc.role !== 'civilian') continue;
       const d = Math.hypot(npc.x - x, npc.z - z);
       if (d < radius) {
-        npc.panicTimer = 6.5 + Math.random() * 3.5;
-        npc.yaw = Math.atan2(npc.x - x, npc.z - z) + (Math.random() - 0.5) * 0.6;
+        npc.rig.setWorkProp?.('none');
+        if (npc.profile.trait === 'любопытный' && d > 13) {
+          // Curious residents turn to watch the incident first
+          npc.aiState = 'witness';
+          npc.stateTimer = 2.6 + Math.random() * 1.4;
+          npc.witnessX = x;
+          npc.witnessZ = z;
+          npc.yaw = Math.atan2(x - npc.x, z - npc.z);
+        } else if (npc.profile.trait === 'смелый' && d > 11) {
+          npc.aiState = 'witness';
+          npc.stateTimer = 3.2;
+          npc.witnessX = x;
+          npc.witnessZ = z;
+          npc.yaw = Math.atan2(x - npc.x, z - npc.z);
+        } else {
+          npc.aiState = 'panic';
+          npc.panicTimer = 6.5 + Math.random() * 3.5;
+          npc.yaw = Math.atan2(npc.x - x, npc.z - z) + (Math.random() - 0.5) * 0.6;
+        }
       }
     }
     for (const veh of this.vehicles) {
@@ -1762,6 +1885,15 @@ export class NexorumEngine {
 
     if (npc.role === 'civilian' || npc.role === 'police') {
       this.addWanted(npc.role === 'police' ? 2 : 1, npc.role === 'police');
+      if (npc.role === 'civilian' && npc.health > 0) {
+        if (npc.profile.trait === 'смелый') {
+          npc.hostileAggro = true;
+        } else {
+          npc.aiState = 'panic';
+          npc.panicTimer = 8.0;
+          npc.rig.setWorkProp?.('none');
+        }
+      }
     }
     if (npc.health <= 0 && npc.alive) {
       npc.alive = false;
@@ -2316,17 +2448,24 @@ export class NexorumEngine {
     this.gordRig.root.rotation.y = this.pYaw;
     this.gordRig.weaponMount.visible = true;
 
+    const windStr = this.weather === 'rain' ? 0.85 : this.weather === 'snow' ? 0.55 : 0.25;
+    const gordTalking = this.dialogueTimer > 0 && this.dialogueTimer < 2.2;
+    const gordSpeechEnv = gordTalking
+      ? Math.max(0, Math.abs(Math.sin(this.elapsed * 13.5)) * 0.65 + Math.sin(this.elapsed * 21.0) * 0.35)
+      : 0;
     animateCharacterRig(this.gordRig, {
       speed,
       maxSpeed: targetMaxSpeed,
       time: this.elapsed,
       dt,
       aiming: this.aiming || this.fireCooldown > 0,
-      talking: this.dialogueTimer > 0,
+      talking: gordTalking,
       seated: false,
       meleeSwing: this.meleeSwingTimer > 0 ? 1 - this.meleeSwingTimer / 0.34 : 0,
       grounded: this.grounded,
       weaponRecoil: this.weaponRecoil,
+      speechEnvelope: gordSpeechEnv,
+      windStrength: windStr,
     });
   }
 
@@ -2486,6 +2625,7 @@ export class NexorumEngine {
         seated: true,
         meleeSwing: 0,
         grounded: true,
+        windStrength: 0.35 + Math.abs(v.speed) * 0.04,
       });
     }
   }
@@ -2634,6 +2774,9 @@ export class NexorumEngine {
           if (v.aiPanicTimer && v.aiPanicTimer > 0) {
             v.aiPanicTimer = Math.max(0, v.aiPanicTimer - dt);
           }
+          if (v.aiHornCooldown && v.aiHornCooldown > 0) {
+            v.aiHornCooldown = Math.max(0, v.aiHornCooldown - dt);
+          }
 
           // Find nearest street centerline on X and Z
           let nearRX = ROAD_CENTERS[0];
@@ -2754,7 +2897,7 @@ export class NexorumEngine {
             }
           }
 
-          // 2. Traffic Light Signal Compliance (Stop smoothly behind crosswalk on Red / Yellow)
+          // 2. Traffic Light Signal Compliance (Stop smoothly behind crosswalk & queue multi-car lines on Red / Yellow)
           const panicking = (v.aiPanicTimer ?? 0) > 0;
           let signalStopActive = false;
           if (panicking) {
@@ -2763,27 +2906,52 @@ export class NexorumEngine {
             Math.abs(nextIX) <= 155 &&
             Math.abs(nextIZ) <= 155 &&
             distToIntersection >= 10.2 &&
-            distToIntersection <= 24.0
+            distToIntersection <= 38.0
           ) {
             const sig = getIntersectionSignal(this.elapsed, nextIX, nextIZ);
             const myLight = Math.abs(tDirX) > 0 ? sig.ew : sig.ns;
             if (myLight === 'red' || (myLight === 'yellow' && distToIntersection > 12.2)) {
               signalStopActive = true;
-              if (distToIntersection <= 22.0) {
+              if (distToIntersection <= 25.0) {
                 const distToStopLine = Math.max(0, distToIntersection - 11.4);
                 targetSpd = distToStopLine < 1.8 ? 0 : Math.min(targetSpd, distToStopLine * 1.45);
               }
             }
           }
 
-          // 3. Real-Time Forward Corridor Obstacle Detection & Steering Avoidance
+          // 3. Real-Time Forward Corridor Obstacle Detection, Right-of-Way & Steering Avoidance
           const fwdX = Math.sin(v.yaw);
           const fwdZ = Math.cos(v.yaw);
           const leftX = Math.cos(v.yaw);
           const leftZ = -Math.sin(v.yaw);
-          const scanDist = 10.5 + Math.max(0, v.speed) * 0.65;
+          const scanDist = 10.5 + Math.max(0, v.speed) * 0.72;
           let targetDodgeOffset = 0;
           let hazardBlocked = false;
+
+          if (!panicking && v.aiPlannedTurn !== 'straight' && distToIntersection < 13.5) {
+            targetSpd = Math.min(targetSpd, 8.2);
+          }
+
+          // Yield right-of-way when turning left across active oncoming traffic
+          if (!panicking && v.aiPlannedTurn === 'left' && distToIntersection >= 5.6 && distToIntersection <= 14.2) {
+            for (const other of this.vehicles) {
+              if (other === v || other.y > 1.5) continue;
+              const dInt = Math.hypot(other.x - nextIX, other.z - nextIZ);
+              if (dInt < 17.5 && Math.abs(other.speed) > 1.8) {
+                const oFwdX = Math.sin(other.yaw);
+                const oFwdZ = Math.cos(other.yaw);
+                const dotOpp = fwdX * oFwdX + fwdZ * oFwdZ;
+                if (dotOpp < -0.55) {
+                  const oToInt = (nextIX - other.x) * oFwdX + (nextIZ - other.z) * oFwdZ;
+                  if (oToInt > -6.5 && oToInt < 16.5) {
+                    const distToWait = Math.max(0, distToIntersection - 9.8);
+                    targetSpd = distToWait < 1.2 ? 0 : Math.min(targetSpd, distToWait * 1.4);
+                    break;
+                  }
+                }
+              }
+            }
+          }
 
           // 3a. Other Vehicles Ahead (Queue smoothly at lights or swerve around stalled wrecks)
           for (const other of this.vehicles) {
@@ -2793,10 +2961,18 @@ export class NexorumEngine {
             const fwdDist = odx * fwdX + odz * fwdZ;
             const latDist = odx * leftX + odz * leftZ;
             if (fwdDist > 0.4 && fwdDist < scanDist && Math.abs(latDist) < 2.25) {
-              const queuingAtSignal = signalStopActive && other.isTraffic && other.health > other.maxHealth * 0.65;
+              const queuingAtSignal =
+                signalStopActive &&
+                other.isTraffic &&
+                other.turnSignal !== 'hazard' &&
+                other.health > other.maxHealth * 0.65;
               const isStoppedObstacle = !queuingAtSignal && Math.abs(other.speed) < 1.0 && other !== this.currentVehicle;
               const isPlayerObstacle = other === this.currentVehicle && Math.abs(other.speed) < 1.5;
               if ((isStoppedObstacle || isPlayerObstacle) && fwdDist < 13.5 && targetSpd > 0) {
+                if (other === this.currentVehicle && fwdDist < 10.5 && v.speed > 4.5 && distPlayer < 45 && (v.aiHornCooldown ?? 0) <= 0) {
+                  this.audio.playHorn(Math.max(0.2, 1 - distPlayer / 45));
+                  v.aiHornCooldown = 3.2;
+                }
                 // Attempt real-time lane-change dodge around stalled/parked obstacle if clear of buildings
                 const dodgeDir = latDist <= 0.35 ? 1 : -1;
                 const probeX = v.x + fwdX * 4.5 + leftX * dodgeDir * 2.8;
@@ -2812,7 +2988,7 @@ export class NexorumEngine {
                   targetSpd = Math.min(targetSpd, Math.max(0, (fwdDist - 6.5) * 1.4));
                 }
               } else {
-                // Normal moving vehicle ahead: maintain safe following distance
+                // Normal moving vehicle ahead or red-light queue: maintain safe following distance
                 if (fwdDist < 7.2) {
                   targetSpd = 0;
                 } else {
@@ -2823,14 +2999,21 @@ export class NexorumEngine {
             }
           }
 
-          // 3b. Pedestrians & Gord on Foot in Forward Path (Emergency Yield / Brake)
+          // 3b. Pedestrians & Gord on Foot in Forward Path (Emergency Yield / Brake + Horn)
           if (!this.currentVehicle) {
             const pF = (this.px - v.x) * fwdX + (this.pz - v.z) * fwdZ;
             const pL = (this.px - v.x) * leftX + (this.pz - v.z) * leftZ;
             if (pF > 0.3 && pF < 11.5 && Math.abs(pL) < 2.1) {
+              if (v.speed > 4.5 && pF < 9.5 && distPlayer < 45 && (v.aiHornCooldown ?? 0) <= 0) {
+                this.audio.playHorn(Math.max(0.2, 1 - distPlayer / 45));
+                v.aiHornCooldown = 3.0;
+              }
               targetSpd = 0;
               hazardBlocked = true;
-              targetDodgeOffset = pL >= 0 ? -1.4 : 1.4;
+              const pedDodge = pL >= 0 ? -1.4 : 1.4;
+              if (!this.collidersWithCheck(v.x + fwdX * 3.0 + leftX * pedDodge, v.z + fwdZ * 3.0 + leftZ * pedDodge, 1.35, 0.5)) {
+                targetDodgeOffset = pedDodge;
+              }
             }
           }
           for (const npc of this.npcs) {
@@ -2839,19 +3022,59 @@ export class NexorumEngine {
             const nL = (npc.x - v.x) * leftX + (npc.z - v.z) * leftZ;
             if (nF > 0.3 && nF < 10.5 && Math.abs(nL) < 1.95) {
               targetSpd = 0;
-              targetDodgeOffset = nL >= 0 ? -1.3 : 1.3;
+              const npcDodge = nL >= 0 ? -1.3 : 1.3;
+              if (!this.collidersWithCheck(v.x + fwdX * 3.0 + leftX * npcDodge, v.z + fwdZ * 3.0 + leftZ * npcDodge, 1.35, 0.5)) {
+                targetDodgeOffset = npcDodge;
+              }
               break;
             }
           }
 
-          // 3c. Dynamic Street Obstacles (Traffic Cones, Hydrants, Crates)
+          // 3c. Dynamic Street Obstacles (Traffic Cones, Hydrants, Crates) with Collider-Safe Swerve
           for (const prop of this.physicsProps) {
             const prF = (prop.x - v.x) * fwdX + (prop.z - v.z) * fwdZ;
             const prL = (prop.x - v.x) * leftX + (prop.z - v.z) * leftZ;
             if (prF > 0.5 && prF < 9.5 && Math.abs(prL) < 1.55) {
-              targetDodgeOffset = prL >= 0 ? -2.1 : 2.1;
-              targetSpd = Math.min(targetSpd, 6.0);
+              const prefDir = prL >= 0 ? -1 : 1;
+              const prefClear = !this.collidersWithCheck(v.x + fwdX * 4.2 + leftX * prefDir * 2.2, v.z + fwdZ * 4.2 + leftZ * prefDir * 2.2, 1.35, 0.5);
+              const altClear = !prefClear && !this.collidersWithCheck(v.x + fwdX * 4.2 - leftX * prefDir * 2.2, v.z + fwdZ * 4.2 - leftZ * prefDir * 2.2, 1.35, 0.5);
+              if (prefClear || altClear) {
+                const dodgeDir = prefClear ? prefDir : -prefDir;
+                targetDodgeOffset = dodgeDir * 2.15;
+                targetSpd = Math.min(targetSpd, 6.0);
+                if (v.turnSignal === 'none') {
+                  v.turnSignal = dodgeDir > 0 ? 'left' : 'right';
+                }
+              } else if (prF < 6.0) {
+                targetSpd = 0;
+                hazardBlocked = true;
+              }
               break;
+            }
+          }
+
+          // 3d. Yield Right & Slow Down for Approaching Police Cruisers with Active Sirens
+          if (this.wantedStars > 0 && !panicking && !hazardBlocked && !v.isPolice) {
+            for (const other of this.vehicles) {
+              if (!other.isPolice || other.driverOccupied || other.health <= 0 || other === v) continue;
+              const odx = other.x - v.x;
+              const odz = other.z - v.z;
+              const dSq = odx * odx + odz * odz;
+              if (dSq < 24 * 24) {
+                const fDist = odx * fwdX + odz * fwdZ;
+                if (fDist > -24 && fDist < 5) {
+                  const curbProbeX = v.x + fwdX * 3.0 - leftX * 1.9;
+                  const curbProbeZ = v.z + fwdZ * 3.0 - leftZ * 1.9;
+                  if (!this.collidersWithCheck(curbProbeX, curbProbeZ, 1.35, 0.5)) {
+                    targetDodgeOffset = Math.min(targetDodgeOffset, -1.8);
+                  }
+                  targetSpd = Math.min(targetSpd, 4.2);
+                  if (v.turnSignal === 'none') {
+                    v.turnSignal = 'right';
+                  }
+                  break;
+                }
+              }
             }
           }
 
@@ -2941,7 +3164,7 @@ export class NexorumEngine {
         v.pitch = THREE.MathUtils.damp(v.pitch, targetSpd === 0 && v.speed > 2 ? 0.03 : 0, 8, dt);
         v.roll = THREE.MathUtils.damp(v.roll, v.steerAngle * Math.min(1, Math.abs(v.speed) / 14) * 0.08, 8, dt);
         if (v.taillightMat) {
-          v.taillightMat.emissiveIntensity = targetSpd === 0 ? 4.2 : 1.8;
+          v.taillightMat.emissiveIntensity = targetSpd === 0 || targetSpd < v.speed - 0.9 ? 4.2 : 1.8;
         }
       }
 
@@ -2977,7 +3200,7 @@ export class NexorumEngine {
       }
       if (v.leftDoor) {
         v.doorOpenProgress = Math.max(0, v.doorOpenProgress - dt * 1.4);
-        v.leftDoor.rotation.y = -v.doorOpenProgress * 0.95;
+        v.leftDoor.rotation.y = v.doorOpenProgress * 0.95;
       }
       if (v.mainRotor) {
         const spin = v.driverOccupied ? 26 : 2.5;
@@ -3004,17 +3227,53 @@ export class NexorumEngine {
   }
 
   private updateNpcs(dt: number) {
+    const windStr = this.weather === 'rain' ? 0.85 : this.weather === 'snow' ? 0.55 : 0.25;
+
     for (const npc of this.npcs) {
       if (!npc.alive) continue;
 
       if (npc.talkingTimer > 0 && npc.talkingTimer < 500) {
-        npc.talkingTimer -= dt;
+        npc.talkingTimer = Math.max(0, npc.talkingTimer - dt);
+      }
+      if (npc.chatterTimer && npc.chatterTimer > 0) {
+        npc.chatterTimer = Math.max(0, npc.chatterTimer - dt);
+        if (npc.chatterTimer === 0) {
+          npc.chatterText = undefined;
+          npc.chatterTone = undefined;
+          // Hand off Turn 2 in resident-to-resident conversation
+          if (npc.partnerId) {
+            const partner = this.npcs.find((p) => p.id === npc.partnerId && p.alive);
+            if (partner && partner.partnerReplyPending && partner.partnerLine) {
+              partner.partnerReplyPending = false;
+              partner.talkingTimer = 3.4;
+              partner.chatterText = partner.partnerLine;
+              partner.chatterTimer = 3.4;
+              partner.chatterTone = 'chat';
+            }
+          }
+        }
+      }
+      if (npc.gordReactCooldown && npc.gordReactCooldown > 0) {
+        npc.gordReactCooldown = Math.max(0, npc.gordReactCooldown - dt);
+      }
+      if (npc.reactTimer && npc.reactTimer > 0) {
+        npc.reactTimer = Math.max(0, npc.reactTimer - dt);
+        if (npc.reactTimer === 0) {
+          npc.reactKind = 'none';
+        }
       }
       if (npc.hitFlinchTimer && npc.hitFlinchTimer > 0) {
         npc.hitFlinchTimer = Math.max(0, npc.hitFlinchTimer - dt);
       }
       if (npc.panicTimer && npc.panicTimer > 0) {
         npc.panicTimer = Math.max(0, npc.panicTimer - dt);
+        if (npc.panicTimer === 0 && npc.aiState === 'panic') {
+          npc.aiState = 'commute';
+          npc.stateTimer = 8;
+        }
+      }
+      if (npc.socialCooldown > 0) {
+        npc.socialCooldown = Math.max(0, npc.socialCooldown - dt);
       }
 
       // Knockback velocity decay from punches, bullets, or vehicle hits
@@ -3037,17 +3296,103 @@ export class NexorumEngine {
       const isHostile =
         npc.role === 'gangster' ||
         npc.role === 'boss' ||
-        (npc.role === 'police' && this.wantedStars > 0);
+        (npc.role === 'police' && this.wantedStars > 0) ||
+        Boolean(npc.hostileAggro);
 
       let aiming = false;
       let moveSpd = 0;
       let meleeSwing = 0;
-      const panicking = npc.role === 'civilian' && (npc.panicTimer ?? 0) > 0;
+      let workPose: WorkPose = 'none';
+      const panicking = npc.role === 'civilian' && ((npc.panicTimer ?? 0) > 0 || npc.aiState === 'panic');
+      let expression: FacialExpression = 'neutral';
+      let gesture: CharacterGesture = 'none';
+
+      // Autonomous Real-Time Reactions to Gord (weapons, reckless cars, cyber-transformation, friendly greetings)
+      if (!isHostile && !panicking && distToPlayer < 12.5) {
+        const gordArmed = !this.currentVehicle && (this.aiming || this.activeSlot <= 2 || (this.activeSlot === 3 && this.meleeSwingTimer > 0));
+        if (npc.role === 'police' && this.wantedStars === 0 && gordArmed && distToPlayer < 11) {
+          if ((npc.gordReactCooldown ?? 0) <= 0) {
+            npc.reactKind = 'annoyed';
+            npc.reactTimer = 2.6;
+            npc.chatterText = GORD_REACTION_LINES.policeWarn[Math.floor(Math.random() * GORD_REACTION_LINES.policeWarn.length)];
+            npc.chatterTimer = 3.0;
+            npc.chatterTone = 'alert';
+            npc.gordReactCooldown = 8.0;
+          }
+          if (this.aiming && distToPlayer < 7.5) {
+            this.addWanted(1, false);
+          }
+        } else if (npc.role === 'civilian') {
+          if (this.currentVehicle && Math.abs(this.currentVehicle.speed) > 13 && distToPlayer < 7.5 && (npc.gordReactCooldown ?? 0) <= 0) {
+            npc.aiState = 'panic';
+            npc.panicTimer = 2.8;
+            npc.yaw = Math.atan2(npc.x - this.px, npc.z - this.pz);
+            npc.chatterText = GORD_REACTION_LINES.nearMissCar[Math.floor(Math.random() * GORD_REACTION_LINES.nearMissCar.length)];
+            npc.chatterTimer = 2.8;
+            npc.chatterTone = 'angry';
+            npc.gordReactCooldown = 7.0;
+          } else if (gordArmed && distToPlayer < 9.5 && (npc.gordReactCooldown ?? 0) <= 0) {
+            npc.rig.setWorkProp?.('none');
+            if (npc.profile.trait === 'смелый') {
+              npc.reactKind = 'annoyed';
+              npc.reactTimer = 2.8;
+              npc.chatterText = GORD_REACTION_LINES.weaponBrave[Math.floor(Math.random() * GORD_REACTION_LINES.weaponBrave.length)];
+              npc.chatterTimer = 3.0;
+              npc.chatterTone = 'angry';
+            } else if (this.aiming && distToPlayer < 6.5) {
+              npc.reactKind = 'fear';
+              npc.reactTimer = 3.0;
+              npc.chatterText = GORD_REACTION_LINES.weaponFear[Math.floor(Math.random() * GORD_REACTION_LINES.weaponFear.length)];
+              npc.chatterTimer = 3.0;
+              npc.chatterTone = 'alert';
+            } else {
+              npc.aiState = 'panic';
+              npc.panicTimer = 4.5;
+              npc.yaw = Math.atan2(npc.x - this.px, npc.z - this.pz);
+              npc.chatterText = GORD_REACTION_LINES.weaponFear[Math.floor(Math.random() * GORD_REACTION_LINES.weaponFear.length)];
+              npc.chatterTimer = 3.0;
+              npc.chatterTone = 'alert';
+            }
+            npc.gordReactCooldown = 9.0;
+          } else if (
+            !this.currentVehicle &&
+            (this.cyberOverdriveActive || this.cyberStage >= 2) &&
+            distToPlayer < 8.5 &&
+            npc.aiState === 'commute' &&
+            (npc.gordReactCooldown ?? 0) <= 0
+          ) {
+            const over = this.cyberOverdriveActive;
+            npc.reactKind = over || npc.profile.trait === 'нервный' ? 'caution' : 'awe';
+            npc.reactTimer = 2.6;
+            const pool = over ? GORD_REACTION_LINES.overdrive : GORD_REACTION_LINES.cyberAwe;
+            npc.chatterText = pool[Math.floor(Math.random() * pool.length)];
+            npc.chatterTimer = 3.2;
+            npc.chatterTone = over ? 'alert' : 'awe';
+            npc.gordReactCooldown = 14.0;
+          } else if (
+            !this.currentVehicle &&
+            this.wantedStars === 0 &&
+            this.activeSlot >= 4 &&
+            distToPlayer < 5.0 &&
+            npc.aiState === 'commute' &&
+            (npc.gordReactCooldown ?? 0) <= 0 &&
+            Math.random() < dt * 0.9
+          ) {
+            npc.reactKind = 'greet';
+            npc.reactTimer = 2.4;
+            npc.chatterText = GORD_REACTION_LINES.greet[Math.floor(Math.random() * GORD_REACTION_LINES.greet.length)];
+            npc.chatterTimer = 2.8;
+            npc.chatterTone = 'greet';
+            npc.gordReactCooldown = 16.0;
+          }
+        }
+      }
 
       if (isHostile && distToPlayer < 46) {
+        expression = 'angry';
+        npc.rig.setWorkProp?.('none');
         npc.yaw = Math.atan2(this.px - npc.x, this.pz - npc.z);
         if (distToPlayer <= 2.1 && !this.currentVehicle) {
-          // Close-quarters melee strike / brawl!
           npc.fireCooldown -= dt;
           if (npc.fireCooldown <= 0) {
             npc.fireCooldown = 0.85;
@@ -3058,7 +3403,7 @@ export class NexorumEngine {
             if (this.armor > 0) this.armor = Math.max(0, this.armor - 7);
             else this.health = Math.max(0, this.health - 9);
           }
-        } else if (distToPlayer > 14) {
+        } else if (distToPlayer > (npc.role === 'civilian' ? 2.0 : 14)) {
           moveSpd = npc.speed * 1.35;
           const nx = npc.x + Math.sin(npc.yaw) * moveSpd * dt;
           const nz = npc.z + Math.cos(npc.yaw) * moveSpd * dt;
@@ -3066,8 +3411,9 @@ export class NexorumEngine {
             npc.x = nx;
             npc.z = nz;
           }
-        } else {
+        } else if (npc.role !== 'civilian') {
           aiming = true;
+          expression = 'focused';
           npc.fireCooldown -= dt;
           if (npc.fireCooldown <= 0) {
             npc.fireCooldown = npc.role === 'boss' ? 0.48 : 0.95;
@@ -3075,8 +3421,9 @@ export class NexorumEngine {
           }
         }
       } else if (panicking) {
-        // Civilians sprint away in panic from gunfire, crashes & explosions!
-        moveSpd = npc.speed * 2.4;
+        expression = 'panic';
+        npc.rig.setWorkProp?.('none');
+        moveSpd = npc.speed * 2.35;
         const nx = npc.x + Math.sin(npc.yaw) * moveSpd * dt;
         const nz = npc.z + Math.cos(npc.yaw) * moveSpd * dt;
         if (Math.abs(nx) > 215 || Math.abs(nz) > 205 || this.collidersWithCheck(nx, nz, 0.5, 0.5)) {
@@ -3085,11 +3432,83 @@ export class NexorumEngine {
           npc.x = nx;
           npc.z = nz;
         }
-      } else if (npc.talkingTimer > 0) {
+      } else if ((npc.reactTimer ?? 0) > 0 && npc.reactKind && npc.reactKind !== 'none') {
         moveSpd = 0;
+        npc.yaw = Math.atan2(this.px - npc.x, this.pz - npc.z);
+        if (npc.reactKind === 'greet') {
+          expression = 'happy';
+          gesture = 'wave';
+        } else if (npc.reactKind === 'awe') {
+          expression = 'curious';
+          gesture = 'point';
+        } else if (npc.reactKind === 'caution' || npc.reactKind === 'fear') {
+          expression = 'panic';
+          gesture = 'hands_up';
+        } else if (npc.reactKind === 'annoyed') {
+          expression = 'angry';
+          gesture = 'point';
+        }
+      } else if (npc.aiState === 'witness') {
+        expression = 'panic';
+        gesture = 'point';
+        moveSpd = 0;
+        npc.stateTimer -= dt;
+        if (npc.witnessX !== undefined && npc.witnessZ !== undefined) {
+          npc.yaw = Math.atan2(npc.witnessX - npc.x, npc.witnessZ - npc.z);
+        }
+        if (npc.stateTimer <= 0) {
+          npc.aiState = 'commute';
+          npc.stateTimer = 8;
+        }
+      } else if (npc.aiState === 'socialize' || npc.talkingTimer > 0) {
+        moveSpd = 0;
+        const speakingNow = (npc.chatterTimer ?? 0) > 0 || npc.talkingTimer > 0;
+        expression = speakingNow ? (Math.sin(npc.phase) > 0.4 ? 'happy' : 'talking') : 'curious';
+        gesture = speakingNow
+          ? npc.phase % 3 > 2
+            ? 'emphasize'
+            : npc.phase % 3 > 1
+            ? 'shrug'
+            : 'explain'
+          : 'nod';
+        npc.stateTimer -= dt;
+        if (npc.stateTimer <= 0 && npc.talkingTimer <= 0) {
+          npc.aiState = 'commute';
+          npc.stateTimer = 8 + Math.random() * 6;
+          npc.socialCooldown = 12 + Math.random() * 10;
+          npc.partnerId = undefined;
+          npc.partnerLine = undefined;
+          npc.partnerReplyPending = false;
+        }
+      } else if (npc.aiState === 'work') {
+        moveSpd = 0;
+        expression = 'focused';
+        workPose = npc.profile.preferredWork;
+        npc.stateTimer -= dt;
+        if (npc.stateTimer <= 0) {
+          npc.rig.setWorkProp?.('none');
+          npc.aiState = 'commute';
+          npc.stateTimer = 8 + Math.random() * 8;
+        }
       } else {
-        // Sidewalk pedestrian walk
+        // Autonomous commute: avoid approaching cars, transition to work or chat with nearby residents
         moveSpd = npc.speed;
+        npc.stateTimer -= dt;
+        if (npc.profile.trait === 'спокойный') expression = 'happy';
+
+        // Steer away from nearby moving vehicles
+        for (const veh of this.vehicles) {
+          if (Math.abs(veh.speed) < 1.5) continue;
+          const dx = npc.x - veh.x;
+          const dz = npc.z - veh.z;
+          const d = Math.hypot(dx, dz);
+          if (d < 6.5 && d > 0.1) {
+            npc.yaw = Math.atan2(dx, dz);
+            moveSpd = npc.speed * 1.45;
+            break;
+          }
+        }
+
         const nx = npc.x + Math.sin(npc.yaw) * moveSpd * dt;
         const nz = npc.z + Math.cos(npc.yaw) * moveSpd * dt;
         if (Math.abs(nx) > 215 || Math.abs(nz) > 205 || this.collidersWithCheck(nx, nz, 0.5, 0.5)) {
@@ -3098,13 +3517,80 @@ export class NexorumEngine {
           npc.x = nx;
           npc.z = nz;
         }
-        if (Math.random() < dt * 0.25) {
-          npc.yaw += (Math.random() - 0.5) * 1.4;
+        if (Math.random() < dt * 0.22) {
+          npc.yaw += (Math.random() - 0.5) * 1.3;
+        }
+
+        // Pairwise spontaneous resident-to-resident conversation with turn-taking lines
+        if (npc.role === 'civilian' && npc.socialCooldown <= 0 && Math.random() < dt * 0.45) {
+          for (const other of this.npcs) {
+            if (
+              other === npc ||
+              !other.alive ||
+              other.role !== 'civilian' ||
+              other.aiState !== 'commute' ||
+              other.socialCooldown > 0
+            ) {
+              continue;
+            }
+            const d = Math.hypot(other.x - npc.x, other.z - npc.z);
+            if (d < 2.8 && d > 0.8) {
+              const pair = NPC_CHATTER_PAIRS[Math.floor(Math.random() * NPC_CHATTER_PAIRS.length)];
+              const dur = 7.0;
+              npc.aiState = 'socialize';
+              npc.stateTimer = dur;
+              npc.talkingTimer = 3.4;
+              npc.partnerId = other.id;
+              npc.chatterText = pair.a;
+              npc.chatterTimer = 3.4;
+              npc.chatterTone = 'chat';
+              npc.yaw = Math.atan2(other.x - npc.x, other.z - npc.z);
+
+              other.aiState = 'socialize';
+              other.stateTimer = dur;
+              other.talkingTimer = 0;
+              other.partnerId = npc.id;
+              other.partnerLine = pair.b;
+              other.partnerReplyPending = true;
+              other.yaw = Math.atan2(npc.x - other.x, npc.z - other.z);
+              break;
+            }
+          }
+        }
+
+        // Periodically stop to work (checking phone/clipboard/inspecting)
+        if (npc.aiState === 'commute' && npc.stateTimer <= 0) {
+          if (npc.profile.trait === 'трудоголик' || Math.random() < 0.55) {
+            npc.aiState = 'work';
+            npc.stateTimer = 6 + Math.random() * 6;
+            npc.rig.setWorkProp?.(npc.profile.preferredWork);
+          } else {
+            npc.stateTimer = 7 + Math.random() * 6;
+          }
         }
       }
 
       npc.rig.root.position.set(npc.x, npc.y, npc.z);
       npc.rig.root.rotation.y = npc.yaw;
+
+      // Natural eye gaze toward Gord when nearby, or subtle environmental scan
+      let gazeYaw = 0;
+      if (distToPlayer < 8.5) {
+        const angToPlayer = Math.atan2(this.px - npc.x, this.pz - npc.z) - npc.yaw;
+        gazeYaw = THREE.MathUtils.clamp(Math.atan2(Math.sin(angToPlayer), Math.cos(angToPlayer)), -0.35, 0.35);
+      }
+
+      // Alternating syllable lip-sync envelope during dialogue, socializing, or Gord reactions
+      const isSpeaking =
+        moveSpd < 0.1 &&
+        ((npc.chatterTimer ?? 0) > 0 || npc.talkingTimer > 0);
+      const speechEnv = isSpeaking
+        ? Math.max(
+            0,
+            Math.abs(Math.sin(this.elapsed * 12.5 + npc.phase)) * 0.62 +
+              Math.sin(this.elapsed * 21.0 + npc.phase * 1.7) * 0.38
+          )
+        : 0;
 
       animateCharacterRig(
         npc.rig,
@@ -3114,12 +3600,19 @@ export class NexorumEngine {
           time: this.elapsed,
           dt,
           aiming,
-          talking: npc.talkingTimer > 0 && moveSpd < 0.1,
+          talking: isSpeaking,
           seated: false,
           meleeSwing,
           grounded: true,
           panic: panicking,
           hitFlinch: (npc.hitFlinchTimer ?? 0) / 0.28,
+          expression,
+          gesture,
+          gender: npc.gender,
+          speechEnvelope: speechEnv,
+          gazeYaw,
+          workPose,
+          windStrength: windStr,
         },
         npc.phase
       );
@@ -3443,7 +3936,7 @@ export class NexorumEngine {
     }
     for (const npc of this.npcs) {
       if (npc.alive && npc.role === 'civilian' && Math.hypot(npc.x - this.px, npc.z - this.pz) < 4.0) {
-        return `[E] Поговорить с прохожим`;
+        return `[E] Поговорить: ${npc.profile.name} (${npc.profile.occupation})`;
       }
     }
     return null;
@@ -3505,6 +3998,28 @@ export class NexorumEngine {
       cyberEffects.push({ id: 'ov_shield', label: 'Нано-щит', detail: '+28% скорость · -35% урон', kind: 'overdrive' });
     }
 
+    // Project up to 2 nearest active resident speech/reaction bubbles above NPC heads
+    const ambientBubbles: AmbientSpeechBubble[] = [];
+    for (const n of this.npcs) {
+      if (!n.alive || !n.chatterText || (n.chatterTimer ?? 0) <= 0) continue;
+      const d = Math.hypot(n.x - this.px, n.z - this.pz);
+      if (d > 16.5) continue;
+      _v1.set(n.x, n.y + 2.08, n.z).project(this.camera);
+      if (_v1.z > -1 && _v1.z < 1 && Math.abs(_v1.x) <= 0.92 && Math.abs(_v1.y) <= 0.88) {
+        ambientBubbles.push({
+          id: n.id,
+          speaker: n.profile.name,
+          text: n.chatterText,
+          screenX: (_v1.x * 0.5 + 0.5) * 100,
+          screenY: (-_v1.y * 0.5 + 0.5) * 100,
+          distance: d,
+          tone: n.chatterTone ?? 'chat',
+        });
+      }
+    }
+    ambientBubbles.sort((a, b) => a.distance - b.distance);
+    if (ambientBubbles.length > 2) ambientBubbles.length = 2;
+
     this.onHudUpdate({
       health: Math.round(this.health),
       maxHealth: this.maxHealth,
@@ -3551,6 +4066,7 @@ export class NexorumEngine {
       totalMissions: this.missions.length,
       interactionPrompt: this.getPromptText(),
       activeDialogue: this.activeDialogue,
+      ambientBubbles,
       activeJob: this.activeJob ? { ...this.activeJob } : null,
       minimapBlips: blips,
       timeOfDay: this.timeOfDay,

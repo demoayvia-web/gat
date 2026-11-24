@@ -62,6 +62,7 @@ const INITIAL_HUD: HudSnapshot = {
   totalMissions: 5,
   interactionPrompt: null,
   activeDialogue: null,
+  ambientBubbles: [],
   activeJob: null,
   minimapBlips: [],
   timeOfDay: 'sunset',
@@ -481,6 +482,41 @@ export default function App() {
               {hud.notification}
             </div>
           )}
+
+          {/* Ambient 3D-Projected Resident Conversations & Reactions to Gord */}
+          {hud.ambientBubbles.map((b) => {
+            const toneStyle =
+              b.tone === 'alert'
+                ? 'border-amber-400/55 text-amber-50'
+                : b.tone === 'angry'
+                ? 'border-rose-400/55 text-rose-50'
+                : b.tone === 'awe'
+                ? 'border-cyan-400/55 text-cyan-50'
+                : b.tone === 'greet'
+                ? 'border-emerald-400/50 text-emerald-50'
+                : 'border-white/20 text-slate-100';
+            const speakerColor =
+              b.tone === 'alert'
+                ? 'text-amber-300'
+                : b.tone === 'angry'
+                ? 'text-rose-300'
+                : b.tone === 'awe'
+                ? 'text-cyan-300'
+                : b.tone === 'greet'
+                ? 'text-emerald-300'
+                : 'text-sky-300';
+            const opacity = Math.max(0.45, Math.min(0.98, 1.18 - b.distance / 18));
+            return (
+              <div
+                key={b.id}
+                className={`fixed -translate-x-1/2 -translate-y-full max-w-[230px] px-2.5 py-1.5 rounded-lg border bg-[#090d16]/88 shadow-lg pointer-events-none ${toneStyle}`}
+                style={{ left: `${b.screenX}%`, top: `${b.screenY}%`, opacity }}
+              >
+                <div className={`text-[10px] font-semibold leading-tight ${speakerColor}`}>{b.speaker}</div>
+                <div className="text-[11px] leading-snug mt-0.5">{b.text}</div>
+              </div>
+            );
+          })}
 
           {hud.activeDialogue && (
             <div className="fixed bottom-28 left-1/2 -translate-x-1/2 w-[min(520px,90vw)] rounded-lg border border-white/15 bg-[#090d16]/90 p-4 shadow-xl">

@@ -94,6 +94,16 @@ export interface VehicleDamageState {
   overall: number;
 }
 
+export interface AmbientSpeechBubble {
+  id: string;
+  speaker: string;
+  text: string;
+  screenX: number;
+  screenY: number;
+  distance: number;
+  tone: 'chat' | 'greet' | 'awe' | 'alert' | 'angry';
+}
+
 export interface HudSnapshot {
   health: number;
   maxHealth: number;
@@ -132,6 +142,7 @@ export interface HudSnapshot {
   totalMissions: number;
   interactionPrompt: string | null;
   activeDialogue: { speaker: string; role: string; text: string } | null;
+  ambientBubbles: AmbientSpeechBubble[];
   activeJob: { title: string; targetX: number; targetZ: number; reward: number; timeLeft: number } | null;
   minimapBlips: Array<{ x: number; z: number; color: string; kind: 'police' | 'enemy' | 'vehicle' | 'poi' | 'mission' }>;
   timeOfDay: TimeOfDay;
