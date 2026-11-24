@@ -1,0 +1,6 @@
+{
+  "name": "NEXORUM",
+  "description": "Реалистичная 3D-игра с открытым миром: современный мегаполис, транспорт, миссии, динамическая погода и трансформация героя Горда в киборга.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
